@@ -16,6 +16,9 @@ const imageUrlCache = {}; // driveFileId -> objectURL
 const failedEntryIds = new Set(); // entry.id
 const failedReplyKeys = new Set(); // `${entryId}:${replyId}`
 
+// 현재 검색어 (비어있으면 검색 중이 아님)
+let currentSearchQuery = "";
+
 // ---------- 연결 상태 ----------
 // "connected" | "saving" | "disconnected"
 let connState = "disconnected";
@@ -27,6 +30,9 @@ const menuBtn = document.getElementById("menu-btn");
 const menuPanel = document.getElementById("menu-panel");
 const themeToggle = document.getElementById("theme-toggle");
 const connStatusBtn = document.getElementById("conn-status-btn");
+const searchBtn = document.getElementById("search-btn");
+const searchPanel = document.getElementById("search-panel");
+const searchInput = document.getElementById("search-input");
 const composerTextEl = document.getElementById("composer-text");
 const composerPostBtn = document.getElementById("composer-post-btn");
 const composerImageBtn = document.getElementById("composer-image-btn");
@@ -49,6 +55,7 @@ const ICONS = {
   check: `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
   menu: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>`,
   comment: `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  search: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>`,
 };
 
 function iconBtn(name, className, title) {
@@ -63,6 +70,7 @@ composerImageBtn.innerHTML = ICONS.image;
 composerImageRemove.innerHTML = ICONS.close;
 composerPostBtn.innerHTML = ICONS.send;
 menuBtn.innerHTML = ICONS.menu;
+searchBtn.innerHTML = ICONS.search;
 
 // ---------- 연결 상태 표시 ----------
 const CONN_TITLES = {
@@ -95,6 +103,10 @@ connStatusBtn.addEventListener("click", () => {
 
 // ---------- 메뉴 / 다크모드 ----------
 menuBtn.addEventListener("click", () => {
+  // 검색 패널이 열려있으면 먼저 닫는다 (동시에 두 패널이 열리지 않도록)
+  if (searchPanel.classList.contains("open")) {
+    closeSearchPanel();
+  }
   menuPanel.classList.toggle("open");
 });
 
@@ -110,6 +122,108 @@ themeToggle.addEventListener("click", () => {
 });
 
 applyTheme(localStorage.getItem("pj-theme") === "dark" ? "dark" : "light");
+
+// ---------- 검색 ----------
+const CHOSUNG_LIST = ["ㄱ","ㄲ","ㄴ","ㄷ","ㄸ","ㄹ","ㅁ","ㅂ","ㅃ","ㅅ","ㅆ","ㅇ","ㅈ","ㅉ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"];
+
+// 문자열의 한글 음절을 초성으로 치환 (한글이 아닌 문자는 그대로 둠 -> 숫자/영문 섞인 검색어도 대응)
+function toChosung(str) {
+  let result = "";
+  for (const ch of str) {
+    const code = ch.charCodeAt(0);
+    if (code >= 0xac00 && code <= 0xd7a3) {
+      const chosungIndex = Math.floor((code - 0xac00) / 588);
+      result += CHOSUNG_LIST[chosungIndex];
+    } else {
+      result += ch;
+    }
+  }
+  return result;
+}
+
+function isChosungOnlyQuery(query) {
+  return [...query].every((ch) => CHOSUNG_LIST.includes(ch));
+}
+
+// 일반 텍스트 포함 검색 + 초성 검색
+function textMatches(text, query) {
+  if (!text) return false;
+  if (text.toLowerCase().includes(query.toLowerCase())) return true;
+  if (isChosungOnlyQuery(query)) {
+    return toChosung(text).includes(query);
+  }
+  return false;
+}
+
+// 검색어가 순수 숫자 4/6/8자리이면 날짜 검색으로 취급
+function isDateQuery(query) {
+  return /^\d{4}$|^\d{6}$|^\d{8}$/.test(query);
+}
+
+function dateMatches(iso, query) {
+  if (!iso) return false;
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const yyyymmdd = `${y}${m}${day}`;
+  return yyyymmdd.startsWith(query);
+}
+
+// 글(entry) + 댓글(replies) 내용/날짜를 모두 대상으로 검색어 일치 여부 판단
+function entryMatches(entry, query) {
+  if (isDateQuery(query)) {
+    if (dateMatches(entry.time, query)) return true;
+    return entry.replies.some((r) => dateMatches(r.time, query));
+  }
+  if (textMatches(entry.text, query)) return true;
+  return entry.replies.some((r) => textMatches(r.text, query));
+}
+
+function closeSearchPanel() {
+  searchPanel.classList.remove("open");
+  searchInput.value = "";
+  currentSearchQuery = "";
+  render();
+}
+
+searchBtn.addEventListener("click", () => {
+  const willOpen = !searchPanel.classList.contains("open");
+  if (willOpen) {
+    // 메뉴 패널이 열려있으면 먼저 닫는다
+    menuPanel.classList.remove("open");
+    searchPanel.classList.add("open");
+    searchInput.focus();
+  } else {
+    closeSearchPanel();
+  }
+});
+
+searchInput.addEventListener("input", () => {
+  const q = searchInput.value.trim();
+  currentSearchQuery = q;
+  if (!q) {
+    render();
+    return;
+  }
+  renderSearchResults(q);
+});
+
+// 검색 결과만 걸러서 피드에 그림
+function renderSearchResults(query) {
+  feedEl.innerHTML = "";
+  const filtered = journal.entries.filter((entry) => entryMatches(entry, query));
+  if (filtered.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "search-empty";
+    empty.textContent = "검색 결과가 없습니다";
+    feedEl.appendChild(empty);
+    return;
+  }
+  for (const entry of filtered) {
+    feedEl.appendChild(buildEntryNode(entry));
+  }
+}
 
 // 날짜+시간을 함께 표시 (연도 포함, 기록이 여러 해에 걸쳐 쌓일 수 있으므로)
 function formatDateTime(iso) {
@@ -309,6 +423,7 @@ async function persist() {
 
 // ---------- 항목 단위 갱신 헬퍼 ----------
 // 특정 글 하나만 다시 만들어 기존 자리에 교체 (피드 전체를 다시 그리지 않음)
+// 검색 중일 때는 수정 결과가 더 이상 검색어와 일치하지 않으면 화면에서 제거함
 function updateEntry(entryId) {
   const entry = journal.entries.find((e) => e.id === entryId);
   const oldNode = feedEl.querySelector(`.entry[data-entry-id="${entryId}"]`);
@@ -316,9 +431,15 @@ function updateEntry(entryId) {
     if (oldNode) oldNode.remove();
     return;
   }
+  if (currentSearchQuery && !entryMatches(entry, currentSearchQuery)) {
+    if (oldNode) oldNode.remove();
+    return;
+  }
   const newNode = buildEntryNode(entry);
   if (oldNode) {
     oldNode.replaceWith(newNode);
+  } else if (currentSearchQuery) {
+    renderSearchResults(currentSearchQuery);
   } else {
     render();
   }
@@ -329,13 +450,19 @@ function removeEntryNode(entryId) {
   const node = feedEl.querySelector(`.entry[data-entry-id="${entryId}"]`);
   if (node) {
     node.remove();
+  } else if (currentSearchQuery) {
+    renderSearchResults(currentSearchQuery);
   } else {
     render();
   }
 }
 
-// 새 글 하나만 만들어 맨 위에 추가 (작성)
+// 새 글 하나만 만들어 맨 위에 추가 (작성). 검색 중이면 검색 결과 기준으로 다시 그림.
 function prependEntryNode(entry) {
+  if (currentSearchQuery) {
+    renderSearchResults(currentSearchQuery);
+    return;
+  }
   const node = buildEntryNode(entry);
   feedEl.prepend(node);
 }
