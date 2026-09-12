@@ -31,7 +31,6 @@ const menuPanel = document.getElementById("menu-panel");
 const themeToggle = document.getElementById("theme-toggle");
 const connStatusBtn = document.getElementById("conn-status-btn");
 const searchBtn = document.getElementById("search-btn");
-const searchPanel = document.getElementById("search-panel");
 const searchInput = document.getElementById("search-input");
 const composerTextEl = document.getElementById("composer-text");
 const composerPostBtn = document.getElementById("composer-post-btn");
@@ -103,9 +102,9 @@ connStatusBtn.addEventListener("click", () => {
 
 // ---------- 메뉴 / 다크모드 ----------
 menuBtn.addEventListener("click", () => {
-  // 검색 패널이 열려있으면 먼저 닫는다 (동시에 두 패널이 열리지 않도록)
-  if (searchPanel.classList.contains("open")) {
-    closeSearchPanel();
+  // 검색창이 열려있으면 먼저 닫는다 (동시에 두 개가 열리지 않도록)
+  if (searchInput.classList.contains("open")) {
+    closeSearch();
   }
   menuPanel.classList.toggle("open");
 });
@@ -180,33 +179,51 @@ function entryMatches(entry, query) {
   return entry.replies.some((r) => textMatches(r.text, query));
 }
 
-function closeSearchPanel() {
-  searchPanel.classList.remove("open");
+// 현재 화면(저널/캘린더)에 맞춰 검색을 적용한다.
+// 저널 화면이면 글/답글만, 캘린더 화면이면 캘린더 기록만 대상으로 함.
+// 화면을 전환하면 같은 검색어를 유지한 채 이 함수가 다시 호출되어 대상만 바뀐다.
+function applySearch(query) {
+  if (currentView === "journal") {
+    if (!query) {
+      render();
+    } else {
+      renderSearchResults(query);
+    }
+  } else {
+    if (!query) {
+      renderCalendar();
+    } else {
+      renderCalendarSearchResults(query);
+    }
+  }
+}
+
+function openSearch() {
+  menuPanel.classList.remove("open");
+  searchInput.classList.add("open");
+  searchInput.focus();
+}
+
+function closeSearch() {
+  searchInput.classList.remove("open");
+  searchInput.blur();
   searchInput.value = "";
   currentSearchQuery = "";
-  render();
+  applySearch("");
 }
 
 searchBtn.addEventListener("click", () => {
-  const willOpen = !searchPanel.classList.contains("open");
-  if (willOpen) {
-    // 메뉴 패널이 열려있으면 먼저 닫는다
-    menuPanel.classList.remove("open");
-    searchPanel.classList.add("open");
-    searchInput.focus();
+  if (searchInput.classList.contains("open")) {
+    closeSearch();
   } else {
-    closeSearchPanel();
+    openSearch();
   }
 });
 
 searchInput.addEventListener("input", () => {
   const q = searchInput.value.trim();
   currentSearchQuery = q;
-  if (!q) {
-    render();
-    return;
-  }
-  renderSearchResults(q);
+  applySearch(q);
 });
 
 // 검색 결과만 걸러서 피드에 그림
@@ -944,6 +961,7 @@ let calState = (() => {
 
 const journalComposerEl = document.getElementById("journal-composer");
 const calendarViewEl = document.getElementById("calendarView");
+const calendarMonthSectionEl = document.getElementById("calendarMonthSection");
 const viewPrevBtn = document.getElementById("viewPrevBtn");
 const viewNextBtn = document.getElementById("viewNextBtn");
 
@@ -981,9 +999,7 @@ function switchToView(name) {
   feedEl.classList.toggle("hidden", name !== "journal");
   journalComposerEl.classList.toggle("hidden", name !== "journal");
   calendarViewEl.classList.toggle("hidden", name !== "calendar");
-  if (name === "calendar") {
-    renderCalendar();
-  }
+  applySearch(currentSearchQuery);
 }
 
 function toggleView() {
@@ -1066,6 +1082,15 @@ function linkifyHtml(str) {
 
   result += escapeHtml(str.slice(lastIndex));
   return result;
+}
+
+// 캘린더 등록/수정/삭제 후 화면 갱신 — 검색 중이면 검색 결과를, 아니면 평소 월별 목록을 다시 그림
+function refreshCalendarView() {
+  if (currentSearchQuery) {
+    renderCalendarSearchResults(currentSearchQuery);
+  } else {
+    renderCalendar();
+  }
 }
 
 // ---------- Drive 저장 (calendar.json, 저널과 동일한 연결 상태/재연결 체계 재사용) ----------
@@ -1375,7 +1400,7 @@ async function handleCalSave() {
     }
     showStatus(editingId ? "수정했어요" : "기록했어요");
     closeCalComposer();
-    renderCalendar();
+    refreshCalendarView();
   } catch (err) {
     console.error(err);
     showStatus("저장 중 문제가 발생했어요", true);
@@ -1405,7 +1430,7 @@ async function handleCalDelete() {
     }
     showStatus("삭제했어요");
     closeCalComposer();
-    renderCalendar();
+    refreshCalendarView();
   } catch (err) {
     console.error(err);
     showStatus("삭제 중 문제가 발생했어요", true);
@@ -1440,6 +1465,8 @@ function toggleMemoAccordion(containerEl, memoElId) {
 
 // ---------- 캘린더 렌더링 ----------
 function renderCalendar() {
+  calendarMonthSectionEl.classList.remove("hidden");
+
   const { year, month } = calState;
   calMonthLabel.textContent = `${year}. ${String(month + 1).padStart(2, "0")}`;
 
@@ -1480,6 +1507,7 @@ function renderCalendar() {
 
 function renderCalendarLogList(monthPrefix) {
   calendarLogList.innerHTML = "";
+  calendarEmptyState.textContent = "이 달에는 기록이 없어요.";
 
   const monthLogs = calendarData.logs
     .filter((l) => l.date.startsWith(monthPrefix))
@@ -1497,6 +1525,64 @@ function renderCalendarLogList(monthPrefix) {
     item.dataset.id = l.id;
     item.innerHTML = `
       <span class="calendar-log-day">${day}.</span>
+      <div class="calendar-log-content">
+        <div class="calendar-log-row">
+          <span class="calendar-log-text">${escapeHtml(l.body)}</span>
+          ${hasMemo ? `
+            <button class="icon-btn" data-action="memo" data-memo-target="${memoElId}" title="메모 보기">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 4h16v12H8l-4 4V4z"></path>
+              </svg>
+            </button>
+          ` : ""}
+        </div>
+        ${hasMemo ? `
+          <div class="log-memo" id="${memoElId}">
+            <div class="log-memo-inner">${linkifyHtml(l.memo)}</div>
+          </div>
+        ` : ""}
+      </div>
+    `;
+    calendarLogList.appendChild(item);
+  });
+}
+
+// ---------- 캘린더 검색 (전체 기간 대상, 저널의 isDateQuery/textMatches 재사용) ----------
+function calendarDateMatches(dateStr, query) {
+  if (!dateStr) return false;
+  return dateStr.replace(/-/g, "").startsWith(query);
+}
+
+function calendarLogMatches(log, query) {
+  if (isDateQuery(query)) {
+    return calendarDateMatches(log.date, query);
+  }
+  return textMatches(log.body, query) || textMatches(log.memo || "", query);
+}
+
+// 검색 중엔 달력 그리드를 숨기고, 전체 기간을 대상으로 연·월·일과 함께 리스트로 보여준다.
+function renderCalendarSearchResults(query) {
+  closeCalComposer();
+  closeCalMonthInput();
+  calendarMonthSectionEl.classList.add("hidden");
+
+  const matches = calendarData.logs
+    .filter((l) => calendarLogMatches(l, query))
+    .sort((a, b) => `${b.date}${b.time}`.localeCompare(`${a.date}${a.time}`));
+
+  calendarLogList.innerHTML = "";
+  calendarEmptyState.textContent = "검색 결과가 없어요";
+  calendarEmptyState.classList.toggle("hidden", matches.length > 0);
+
+  matches.forEach((l) => {
+    const hasMemo = !!(l.memo && l.memo.trim());
+    const memoElId = `cal-memo-${l.id}`;
+
+    const item = document.createElement("div");
+    item.className = "calendar-log-item";
+    item.dataset.id = l.id;
+    item.innerHTML = `
+      <span class="calendar-log-day">${formatCalComposerDate(l.date)}</span>
       <div class="calendar-log-content">
         <div class="calendar-log-row">
           <span class="calendar-log-text">${escapeHtml(l.body)}</span>
