@@ -180,9 +180,6 @@ html, body {
   opacity: 1;
   border-bottom: 1px solid var(--line); /* 헤더 구분선과 동일한 색상 */
 }
-.search-input-inline.open:focus {
-  border-bottom-color: var(--accent);
-}
 .search-input-inline::placeholder { color: var(--ink-faint); }
 
 .search-empty {
