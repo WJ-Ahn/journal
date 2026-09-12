@@ -13,4 +13,8 @@ const CONFIG = {
   // 폴더를 열었을 때 주소창의 .../folders/ 뒤에 나오는 문자열입니다.
   FOLDER_ID: "1yOCFd6kutO5WExtJEqXmXA0hsOblkpKk",
   JOURNAL_FILENAME: "journal.json",
+
+  // 캘린더 화면(舊 LOG 앱)의 데이터 파일명.
+  // 저널과 같은 FOLDER_ID 안에 별도 파일로 저장됨.
+  CALENDAR_FILENAME: "calendar.json",
 };

@@ -49,6 +49,9 @@ html, body {
   flex-direction: column;
 }
 
+/* 공용 유틸 */
+.hidden { display: none !important; }
+
 /* Sign-in screen */
 #signin-screen {
   align-items: center;
@@ -576,4 +579,439 @@ html, body {
 html::-webkit-scrollbar,
 body::-webkit-scrollbar {
   display: none; /* Chrome, Safari */
+}
+
+/* ==========================================================
+   캘린더 화면 (舊 LOG 앱에서 이식 — 저널에 종속된 두 번째 화면)
+   레이아웃·기능은 원본 그대로, 색상만 위 저널 팔레트 변수로 매핑함.
+   ========================================================== */
+
+/* 화면 전환용 좌우 플로팅 버튼 (저널 ↔ 캘린더, 항상 노출) */
+.fab-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  width: 26px;
+  min-height: 60px;
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .fab-nav:hover { background: var(--accent-soft); color: var(--ink); }
+}
+.fab-nav-left {
+  left: 0;
+  border-radius: 0 10px 10px 0;
+}
+.fab-nav-right {
+  right: 0;
+  border-radius: 10px 0 0 10px;
+}
+
+/* 캘린더 작성창 / 삭제 확인 모달에 쓰이는 공용 버튼 */
+.btn-primary, .btn-ghost {
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 0.88rem;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  padding: 11px 16px;
+  min-height: 44px;
+  transition: background-color 0.15s ease, opacity 0.15s ease, color 0.15s ease;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--surface);
+}
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn-ghost:hover { background: var(--accent-soft); }
+}
+.btn-ghost.small, .btn-primary.small {
+  padding: 7px 10px;
+  min-height: 38px;
+  font-size: 0.78rem;
+}
+.btn-ghost.danger {
+  color: var(--status-disconnected);
+  border-color: var(--status-disconnected);
+}
+.btn-ghost:disabled, .btn-ghost.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 0.95rem;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 8px;
+  padding: 2px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn:hover { color: var(--ink-soft); background: var(--accent-soft); }
+}
+.icon-btn.memo-active { color: var(--accent); }
+
+/* 캘린더 화면 내부의 입력 요소 스타일 — #calendarView로 범위를 한정해서
+   저널 본문(검색창, 작성창, 답글창, 수정창)의 input/textarea에는 영향 없음 */
+#calendarView input,
+#calendarView textarea,
+#calendarView select {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: var(--font);
+  font-size: 16px;
+  width: 100%;
+  outline: none;
+}
+#calendarView input:focus,
+#calendarView textarea:focus,
+#calendarView select:focus {
+  border-color: var(--accent);
+}
+#calendarView input.invalid {
+  border-color: var(--status-disconnected);
+}
+#calendarView .mono-input {
+  background: transparent;
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--accent);
+}
+#calendarView textarea {
+  background: transparent;
+  resize: vertical;
+  line-height: 1.5;
+}
+#calendarView textarea.autosize {
+  resize: none;
+  overflow: hidden;
+}
+#calendarView .memo-textarea { color: var(--ink-soft); }
+#calendarView .memo-textarea:focus { color: var(--ink); }
+
+#calendarView {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 10px 20px 60px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 2px;
+}
+
+.calendar-month-label {
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 월 라벨 자리를 그대로 대체하는 인라인 년월 입력창 (롱프레스 시 노출) */
+.calendar-month-input {
+  width: 108px;
+  text-align: center;
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+}
+.calendar-month-input.invalid {
+  color: var(--status-disconnected);
+}
+.calendar-month-input::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  text-align: center;
+}
+
+.calendar-weekdays {
+  margin-bottom: 2px;
+}
+
+.calendar-weekday {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  padding: 6px 0;
+}
+
+.calendar-cell {
+  position: relative;
+  min-height: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  padding-top: 8px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.calendar-cell.empty {
+  visibility: hidden;
+}
+
+.calendar-cell:not(.empty) {
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .calendar-cell:not(.empty):hover { background: var(--accent-soft); }
+}
+
+.calendar-cell.today {
+  border: 1px solid var(--accent);
+}
+
+.calendar-cell.selected {
+  background: var(--accent);
+  color: var(--surface);
+}
+.calendar-cell.selected .calendar-dot {
+  background: var(--surface);
+}
+
+.calendar-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* 캘린더 인라인 작성창 (날짜 그리드와 하단 로그리스트 사이 슬라이드다운) */
+.cal-composer {
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.25s ease;
+}
+.cal-composer.open {
+  max-height: 420px;
+}
+
+.cal-composer-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 2px 4px;
+  border-top: 1px dashed var(--line);
+  border-bottom: 1px dashed var(--line);
+}
+
+.cal-composer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cal-composer-date {
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--accent);
+}
+
+.cal-time-input {
+  width: 76px;
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+.cal-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.calendar-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calendar-log-item {
+  display: flex;
+  gap: 10px;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  transition: background-color 0.15s ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .calendar-log-item:hover { background: var(--accent-soft); }
+}
+
+.calendar-log-day {
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+  min-width: 26px;
+}
+
+.calendar-log-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.calendar-log-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.calendar-log-row .icon-btn {
+  min-height: 0;
+  padding: 0;
+  margin-top: 1px;
+}
+
+.calendar-log-text {
+  color: var(--ink);
+  white-space: pre-wrap;
+  flex: 1;
+}
+
+/* 메모 아코디언 (캘린더 로그리스트 전용) */
+.log-memo {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+}
+.log-memo.open {
+  max-height: 600px;
+}
+.log-memo-inner {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-memo-inner a {
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  padding: 40px 0;
+}
+
+/* 삭제 확인 모달 (캘린더 전용 — 브라우저 기본 confirm() 대체) */
+.confirm-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 60;
+}
+
+.confirm-modal-box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 320px;
+  width: 100%;
+  text-align: center;
+}
+
+.confirm-modal-message {
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--ink);
+  margin: 0 0 16px;
+  white-space: pre-wrap;
+}
+
+.confirm-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+.confirm-modal-actions .btn-ghost {
+  flex: 1;
+}
+
+/* 상태 메시지 (화면 정중앙, 캘린더 등록/수정/삭제/유효성 피드백용) */
+.status-bar {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 12px 20px;
+  border-radius: 12px;
+  max-width: 82%;
+  text-align: center;
+  z-index: 50;
+}
+.status-bar.error {
+  border-color: var(--status-disconnected);
+  color: var(--status-disconnected);
 }

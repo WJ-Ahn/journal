@@ -5,6 +5,11 @@
 // 네트워크 오류, 권한 문제 등) 조용히 넘어가지 않고 에러를 던지도록 했음.
 // 이렇게 해야 app.js가 저장/불러오기 실패를 감지해서 연결 상태 아이콘을
 // "끊김"으로 바꿀 수 있음.
+//
+// 추가 사항: 캘린더 화면(舊 LOG 앱)이 저널과 같은 FOLDER_ID 안에서
+// calendar.json 파일을 별도로 읽고 쓸 수 있도록 findCalendarFileId /
+// loadCalendar / saveCalendar를 추가함. 로직은 journal.json 쪽과 동일하고
+// 파일명만 다름.
 
 const DriveClient = (() => {
   let accessToken = null;
@@ -126,5 +131,80 @@ const DriveClient = (() => {
     return URL.createObjectURL(blob);
   }
 
-  return { setToken, loadJournal, saveJournal, uploadImage, getImageObjectUrl };
+  // 7) calendar.json 파일 id 찾기 (journal.json과 같은 폴더, 파일명만 다름)
+  async function findCalendarFileId() {
+    const parent = await ensureFolder();
+    const q = encodeURIComponent(
+      `name='${CONFIG.CALENDAR_FILENAME}' and '${parent}' in parents and trashed=false`
+    );
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) {
+      throw new Error(`Drive 파일 검색 실패 (status ${res.status})`);
+    }
+    const data = await res.json();
+    return data.files && data.files.length > 0 ? data.files[0].id : null;
+  }
+
+  // 8) calendar.json 내용 불러오기 (파일이 없으면 빈 기록, 요청 실패는 에러로 전파)
+  async function loadCalendar() {
+    const fileId = await findCalendarFileId();
+    if (!fileId) {
+      return { logs: [] };
+    }
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) {
+      throw new Error(`Drive 파일 로드 실패 (status ${res.status})`);
+    }
+    return await res.json();
+  }
+
+  // 9) calendar.json 저장 (있으면 덮어쓰기, 없으면 새로 생성). 실패 시 에러를 던짐.
+  async function saveCalendar(calendarObj) {
+    const parent = await ensureFolder();
+    const fileId = await findCalendarFileId();
+    const content = JSON.stringify(calendarObj, null, 2);
+    const blob = new Blob([content], { type: "application/json" });
+
+    if (fileId) {
+      const res = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+        { method: "PATCH", headers: authHeaders(), body: blob }
+      );
+      if (!res.ok) {
+        throw new Error(`Drive 저장 실패 (status ${res.status})`);
+      }
+      return fileId;
+    }
+
+    const metadata = { name: CONFIG.CALENDAR_FILENAME, parents: [parent] };
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+    form.append("file", blob);
+
+    const res = await fetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+      { method: "POST", headers: authHeaders(), body: form }
+    );
+    if (!res.ok) {
+      throw new Error(`Drive 파일 생성 실패 (status ${res.status})`);
+    }
+    const created = await res.json();
+    return created.id;
+  }
+
+  return {
+    setToken,
+    loadJournal,
+    saveJournal,
+    uploadImage,
+    getImageObjectUrl,
+    loadCalendar,
+    saveCalendar,
+  };
 })();

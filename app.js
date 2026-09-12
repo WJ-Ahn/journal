@@ -394,17 +394,29 @@ async function startApp() {
   document.getElementById("app-screen").style.display = "flex";
 
   setConnStatus("saving");
-  const result = await callDriveWithReconnect(() => DriveClient.loadJournal());
-  if (result.ok) {
-    journal = result.value;
+
+  const journalResult = await callDriveWithReconnect(() => DriveClient.loadJournal());
+  if (journalResult.ok) {
+    journal = journalResult.value;
     if (!journal.entries) journal.entries = [];
-    setConnStatus("connected");
   } else {
-    setConnStatus("disconnected");
     alert("Drive에서 기록을 불러오지 못했습니다. 상단 좌측 아이콘을 눌러 재연결해주세요.");
     journal = { entries: [] };
   }
+
+  // 캘린더 화면(舊 LOG 앱) 데이터도 같은 폴더의 calendar.json에서 함께 불러옴
+  const calendarResult = await callDriveWithReconnect(() => DriveClient.loadCalendar());
+  if (calendarResult.ok) {
+    calendarData = calendarResult.value;
+    if (!calendarData.logs) calendarData.logs = [];
+  } else {
+    alert("캘린더 기록을 불러오지 못했습니다. 상단 좌측 아이콘을 눌러 재연결해주세요.");
+    calendarData = { logs: [] };
+  }
+
+  setConnStatus(journalResult.ok && calendarResult.ok ? "connected" : "disconnected");
   render();
+  renderCalendar();
 }
 
 // Drive 저장을 시도. 실패 시 조용한 재연결 후 한 번 더 시도.
@@ -908,6 +920,630 @@ composerTextEl.value = "";
   if (!success) {
     failedEntryIds.add(newEntry.id);
     updateEntry(newEntry.id); // "저장되지 않음 / 다시 시도" 표시를 붙여서 다시 그림
+  }
+});
+
+// ==========================================================
+// 캘린더 화면 (舊 LOG 앱에서 이식 — 저널에 종속된 두 번째 화면)
+// 자체 헤더/설정메뉴 없이 저널의 헤더·메뉴·연결상태·다크모드를 그대로 사용함.
+// 데이터는 저널과 같은 Drive 폴더 안 calendar.json 파일에 별도로 저장됨.
+// ==========================================================
+
+let calendarData = { logs: [] };
+let currentView = "journal"; // "journal" | "calendar"
+
+let selectedCalDate = null; // 캘린더뷰에서 작성창이 열려있는 날짜 (없으면 null)
+let calEditingId = null;    // 작성창이 수정 모드일 때 대상 로그의 id (생성 모드면 null)
+let calEntryTimeBeforeEdit = ""; // calEntryTime 포커스 시 비우기 전의 원래 값
+let monthLabelPressStart = 0;    // 월 라벨을 누르기 시작한 시각 (0이면 눌려있지 않음)
+
+let calState = (() => {
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() }; // month: 0~11
+})();
+
+const journalComposerEl = document.getElementById("journal-composer");
+const calendarViewEl = document.getElementById("calendarView");
+const viewPrevBtn = document.getElementById("viewPrevBtn");
+const viewNextBtn = document.getElementById("viewNextBtn");
+
+const calPrevBtn = document.getElementById("calPrevBtn");
+const calNextBtn = document.getElementById("calNextBtn");
+const calMonthLabel = document.getElementById("calMonthLabel");
+const calMonthLabelInput = document.getElementById("calMonthLabelInput");
+const calendarGrid = document.getElementById("calendarGrid");
+const calendarLogList = document.getElementById("calendarLogList");
+const calendarEmptyState = document.getElementById("calendarEmptyState");
+
+const calComposer = document.getElementById("calComposer");
+const calComposerDate = document.getElementById("calComposerDate");
+const calEntryTime = document.getElementById("calEntryTime");
+const calEntryBody = document.getElementById("calEntryBody");
+const calEntryMemo = document.getElementById("calEntryMemo");
+const calSaveBtn = document.getElementById("calSaveBtn");
+const calDeleteBtn = document.getElementById("calDeleteBtn");
+
+const statusBar = document.getElementById("statusBar");
+
+const confirmModal = document.getElementById("confirmModal");
+const confirmModalMessage = document.getElementById("confirmModalMessage");
+const confirmModalCancelBtn = document.getElementById("confirmModalCancelBtn");
+const confirmModalOkBtn = document.getElementById("confirmModalOkBtn");
+
+// ---------- 화면 전환 (저널 ↔ 캘린더, 좌우 플로팅 버튼) ----------
+function switchToView(name) {
+  if (name === currentView) return;
+  if (currentView === "calendar") {
+    closeCalComposer();
+    closeCalMonthInput();
+  }
+  currentView = name;
+  feedEl.classList.toggle("hidden", name !== "journal");
+  journalComposerEl.classList.toggle("hidden", name !== "journal");
+  calendarViewEl.classList.toggle("hidden", name !== "calendar");
+  if (name === "calendar") {
+    renderCalendar();
+  }
+}
+
+function toggleView() {
+  switchToView(currentView === "journal" ? "calendar" : "journal");
+}
+
+viewPrevBtn.addEventListener("click", toggleView);
+viewNextBtn.addEventListener("click", toggleView);
+
+// ---------- 상태 메시지 (화면 정중앙, 캘린더 등록/수정/삭제/유효성 피드백용) ----------
+let statusTimer = null;
+function showStatus(msg, isError = false) {
+  statusBar.textContent = msg;
+  statusBar.classList.remove("hidden");
+  statusBar.classList.toggle("error", isError);
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => statusBar.classList.add("hidden"), 2600);
+}
+
+// ---------- 삭제 확인 모달 (캘린더 전용, 브라우저 기본 confirm() 대체) ----------
+let confirmResolver = null;
+
+function askConfirm(message) {
+  confirmModalMessage.textContent = message;
+  confirmModal.classList.remove("hidden");
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
+}
+
+function resolveConfirm(result) {
+  confirmModal.classList.add("hidden");
+  if (confirmResolver) {
+    confirmResolver(result);
+    confirmResolver = null;
+  }
+}
+
+confirmModalCancelBtn.addEventListener("click", () => resolveConfirm(false));
+confirmModalOkBtn.addEventListener("click", () => resolveConfirm(true));
+confirmModal.addEventListener("click", (e) => {
+  if (e.target === confirmModal) resolveConfirm(false); // 배경 클릭 시 취소
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !confirmModal.classList.contains("hidden")) {
+    resolveConfirm(false);
+  }
+});
+
+// ---------- 캘린더 전용 링크 인식 (www. 포함, 끝 문장부호 분리 — escapeHtml은 저널 것 재사용) ----------
+function linkifyHtml(str) {
+  if (!str) return "";
+  const urlRegex = /((?:https?:\/\/|www\.)[^\s<]+)/gi;
+  let result = "";
+  let lastIndex = 0;
+  let match;
+
+  while ((match = urlRegex.exec(str)) !== null) {
+    result += escapeHtml(str.slice(lastIndex, match.index));
+
+    let url = match[0];
+    // 문장 부호가 링크 끝에 딸려오는 경우 분리 (예: "...주소.txt)." → 마지막 ). 제외)
+    let trailing = "";
+    const trailingMatch = url.match(/[),.!?;:'"]+$/);
+    if (trailingMatch) {
+      trailing = trailingMatch[0];
+      url = url.slice(0, -trailing.length);
+    }
+
+    if (url) {
+      const href = url.startsWith("www.") ? `https://${url}` : url;
+      result += `<a href="${href}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+      result += escapeHtml(trailing);
+    } else {
+      result += escapeHtml(match[0]);
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  result += escapeHtml(str.slice(lastIndex));
+  return result;
+}
+
+// ---------- Drive 저장 (calendar.json, 저널과 동일한 연결 상태/재연결 체계 재사용) ----------
+async function persistCalendar() {
+  setConnStatus("saving");
+  const result = await callDriveWithReconnect(() => DriveClient.saveCalendar(calendarData));
+  if (result.ok) {
+    setConnStatus("connected");
+    return true;
+  }
+  setConnStatus("disconnected");
+  return false;
+}
+
+// ---------- 시간 입력 파싱 ----------
+// "1200", "930", "12:00" 등 다양한 형태의 입력을 "HH:MM" 로 변환한다.
+// 자릿수 1~2개는 시(時)로만, 3자리는 시 1자리 + 분 2자리, 4자리는 시 2자리 + 분 2자리로 해석한다.
+// 24시간/60분 범위를 벗어나거나 해석 불가능하면 null 을 반환한다.
+function parseTimeInput(raw) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const colonMatch = trimmed.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (colonMatch) {
+    const h = parseInt(colonMatch[1], 10);
+    const m = parseInt(colonMatch[2], 10);
+    if (h > 23 || m > 59) return null;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+
+  const digits = trimmed.replace(/[^0-9]/g, "");
+  if (!digits) return null;
+
+  let h, m;
+  if (digits.length <= 2) {
+    h = parseInt(digits, 10);
+    m = 0;
+  } else if (digits.length === 3) {
+    h = parseInt(digits.slice(0, 1), 10);
+    m = parseInt(digits.slice(1), 10);
+  } else if (digits.length === 4) {
+    h = parseInt(digits.slice(0, 2), 10);
+    m = parseInt(digits.slice(2), 10);
+  } else {
+    return null;
+  }
+
+  if (isNaN(h) || isNaN(m) || h > 23 || m > 59) return null;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+// 클릭(포커스) 시 기존 시간을 지워 바로 새 값을 입력할 수 있게 한다.
+function handleCalTimeFocus() {
+  calEntryTimeBeforeEdit = calEntryTime.value;
+  calEntryTime.value = "";
+  calEntryTime.classList.remove("invalid");
+}
+
+// 포커스 아웃 시 입력값을 HH:MM 형태로 변환한다.
+// 아무것도 입력하지 않고 빠져나가면 포커스 전 원래 시간으로 복원하고,
+// 형식이 안 맞는 값을 입력했다면 invalid 표시만 하고 값은 그대로 둔다 (등록 시점에 다시 한번 막힌다).
+function handleCalTimeBlur() {
+  if (!calEntryTime.value.trim()) {
+    calEntryTime.value = calEntryTimeBeforeEdit;
+    calEntryTime.classList.remove("invalid");
+    return;
+  }
+  const parsed = parseTimeInput(calEntryTime.value);
+  if (parsed) {
+    calEntryTime.value = parsed;
+    calEntryTime.classList.remove("invalid");
+  } else {
+    calEntryTime.classList.add("invalid");
+  }
+}
+
+calEntryTime.addEventListener("focus", handleCalTimeFocus);
+calEntryTime.addEventListener("blur", handleCalTimeBlur);
+calEntryBody.addEventListener("input", () => autoResizeTextarea(calEntryBody));
+calEntryMemo.addEventListener("input", () => autoResizeTextarea(calEntryMemo));
+
+// ---------- 월 이동 / 월 라벨 짧게=오늘로, 길게=년월 입력창 ----------
+const MONTH_LABEL_LONG_PRESS_MS = 550;
+
+function changeMonth(delta) {
+  closeCalComposer();
+  closeCalMonthInput();
+  calState.month += delta;
+  if (calState.month < 0) {
+    calState.month = 11;
+    calState.year -= 1;
+  } else if (calState.month > 11) {
+    calState.month = 0;
+    calState.year += 1;
+  }
+  renderCalendar();
+}
+
+function handleMonthLabelPointerDown() {
+  monthLabelPressStart = Date.now();
+}
+
+// 뗀 시점에 눌려있던 시간을 계산해 짧게/길게를 판별한다.
+function handleMonthLabelPointerUp() {
+  if (!monthLabelPressStart) return;
+  const elapsed = Date.now() - monthLabelPressStart;
+  monthLabelPressStart = 0;
+  if (elapsed >= MONTH_LABEL_LONG_PRESS_MS) {
+    openCalMonthInput();
+  } else {
+    jumpToToday();
+  }
+}
+
+// 손가락이 라벨 밖으로 벗어나거나(pointerleave) 제스처가 취소되면(pointercancel) 아무 동작도 하지 않는다.
+function handleMonthLabelPointerCancel() {
+  monthLabelPressStart = 0;
+}
+
+function jumpToToday() {
+  closeCalComposer();
+  const now = new Date();
+  calState = { year: now.getFullYear(), month: now.getMonth() };
+  renderCalendar();
+}
+
+// 숫자만 추출해 4자리(연도만, 현재 보고 있는 달 유지) 또는 6자리(연+월)로 해석한다.
+function parseYearMonthInput(raw) {
+  if (!raw) return null;
+  const digits = raw.trim().replace(/[^0-9]/g, "");
+
+  if (digits.length === 4) {
+    const year = parseInt(digits, 10);
+    if (isNaN(year)) return null;
+    return { year, month: calState.month };
+  }
+
+  if (digits.length === 6) {
+    const year = parseInt(digits.slice(0, 4), 10);
+    const month = parseInt(digits.slice(4, 6), 10);
+    if (isNaN(year) || isNaN(month) || month < 1 || month > 12) return null;
+    return { year, month: month - 1 };
+  }
+
+  return null;
+}
+
+function openCalMonthInput() {
+  calMonthLabelInput.value = "";
+  calMonthLabelInput.classList.remove("invalid");
+  calMonthLabel.classList.add("hidden");
+  calMonthLabelInput.classList.remove("hidden");
+  calMonthLabelInput.focus();
+}
+
+function closeCalMonthInput() {
+  calMonthLabelInput.classList.add("hidden");
+  calMonthLabelInput.classList.remove("invalid");
+  calMonthLabel.classList.remove("hidden");
+}
+
+function handleCalMonthInputConfirm() {
+  const parsed = parseYearMonthInput(calMonthLabelInput.value);
+  if (!parsed) {
+    calMonthLabelInput.classList.add("invalid");
+    showStatus("년월 형식이 올바르지 않아요", true);
+    return;
+  }
+  closeCalComposer();
+  calState = { year: parsed.year, month: parsed.month };
+  closeCalMonthInput();
+  renderCalendar();
+}
+
+calPrevBtn.addEventListener("click", () => changeMonth(-1));
+calNextBtn.addEventListener("click", () => changeMonth(1));
+calMonthLabel.addEventListener("pointerdown", handleMonthLabelPointerDown);
+calMonthLabel.addEventListener("pointerup", handleMonthLabelPointerUp);
+calMonthLabel.addEventListener("pointerleave", handleMonthLabelPointerCancel);
+calMonthLabel.addEventListener("pointercancel", handleMonthLabelPointerCancel);
+calMonthLabelInput.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeCalMonthInput();
+});
+calMonthLabelInput.addEventListener("change", handleCalMonthInputConfirm);
+calMonthLabelInput.addEventListener("blur", closeCalMonthInput);
+
+// ---------- 캘린더 인라인 작성 / 수정 ----------
+function formatCalComposerDate(dateStr) {
+  const [y, m, d] = dateStr.split("-");
+  return `${y}. ${m}. ${d}.`;
+}
+
+// 선택된 날짜 셀에만 selected 클래스를 입힌다 (전체 재렌더링 없이 하이라이트만 갱신)
+function updateSelectedHighlight() {
+  calendarGrid.querySelectorAll(".calendar-cell.selected").forEach((c) => {
+    c.classList.remove("selected");
+  });
+  if (selectedCalDate) {
+    const cell = calendarGrid.querySelector(`.calendar-cell[data-date="${selectedCalDate}"]`);
+    if (cell) cell.classList.add("selected");
+  }
+}
+
+// 날짜 셀 클릭 → 빈 작성창 (등록 모드)
+function openCalComposer(dateStr) {
+  closeCalMonthInput();
+  calEditingId = null;
+  selectedCalDate = dateStr;
+  calComposerDate.textContent = formatCalComposerDate(dateStr);
+  calEntryTime.value = new Date().toTimeString().slice(0, 5);
+  calEntryTime.classList.remove("invalid");
+  calEntryBody.value = "";
+  calEntryMemo.value = "";
+  autoResizeTextarea(calEntryBody);
+  autoResizeTextarea(calEntryMemo);
+  calSaveBtn.textContent = "등록";
+  calDeleteBtn.classList.add("hidden");
+  calComposer.classList.add("open");
+  updateSelectedHighlight();
+}
+
+// 하단 로그리스트 항목 클릭 → 값이 채워진 작성창 (수정 모드)
+function openCalComposerForEdit(logId) {
+  const log = calendarData.logs.find((l) => l.id === logId);
+  if (!log) return;
+
+  closeCalMonthInput();
+
+  // 열려있던 메모 아코디언은 닫는다
+  calendarLogList.querySelectorAll(".log-memo.open").forEach((m) => m.classList.remove("open"));
+  calendarLogList.querySelectorAll(".icon-btn.memo-active").forEach((btn) => btn.classList.remove("memo-active"));
+
+  calEditingId = logId;
+  selectedCalDate = log.date;
+  calComposerDate.textContent = formatCalComposerDate(log.date);
+  calEntryTime.value = log.time;
+  calEntryTime.classList.remove("invalid");
+  calEntryBody.value = log.body;
+  calEntryMemo.value = log.memo || "";
+  autoResizeTextarea(calEntryBody);
+  autoResizeTextarea(calEntryMemo);
+  calSaveBtn.textContent = "수정 완료";
+  calDeleteBtn.classList.remove("hidden");
+  calComposer.classList.add("open");
+  updateSelectedHighlight();
+}
+
+function closeCalComposer() {
+  if (!selectedCalDate) return;
+  selectedCalDate = null;
+  calEditingId = null;
+  calComposer.classList.remove("open");
+  calEntryBody.value = "";
+  calEntryMemo.value = "";
+  autoResizeTextarea(calEntryBody);
+  autoResizeTextarea(calEntryMemo);
+  calEntryTime.classList.remove("invalid");
+  calSaveBtn.textContent = "등록";
+  calDeleteBtn.classList.add("hidden");
+  updateSelectedHighlight();
+}
+
+async function handleCalSave() {
+  const body = calEntryBody.value.trim();
+  const memo = calEntryMemo.value.trim();
+  if (!body) {
+    showStatus("본문을 입력해주세요", true);
+    return;
+  }
+
+  const parsedTime = parseTimeInput(calEntryTime.value);
+  if (!parsedTime) {
+    showStatus("시간 형식이 올바르지 않아요", true);
+    calEntryTime.classList.add("invalid");
+    return;
+  }
+  calEntryTime.value = parsedTime;
+  calEntryTime.classList.remove("invalid");
+
+  if (!selectedCalDate) return;
+
+  const editingId = calEditingId;
+  calSaveBtn.disabled = true;
+  calDeleteBtn.disabled = true;
+  try {
+    if (editingId) {
+      const target = calendarData.logs.find((l) => l.id === editingId);
+      if (!target) throw new Error("대상을 찾을 수 없어요");
+      target.date = selectedCalDate;
+      target.time = parsedTime;
+      target.body = body;
+      target.memo = memo;
+    } else {
+      calendarData.logs.unshift({
+        id: crypto.randomUUID(),
+        date: selectedCalDate,
+        time: parsedTime,
+        body,
+        memo,
+      });
+    }
+    const success = await persistCalendar();
+    if (!success) {
+      showStatus("저장 중 문제가 발생했어요", true);
+      return;
+    }
+    showStatus(editingId ? "수정했어요" : "기록했어요");
+    closeCalComposer();
+    renderCalendar();
+  } catch (err) {
+    console.error(err);
+    showStatus("저장 중 문제가 발생했어요", true);
+  } finally {
+    calSaveBtn.disabled = false;
+    calDeleteBtn.disabled = false;
+  }
+}
+
+// 작성창이 수정 모드일 때 삭제 버튼에서 호출
+async function handleCalDelete() {
+  if (!calEditingId) return;
+  if (!(await askConfirm("이 기록을 삭제할까요?"))) return;
+
+  const id = calEditingId;
+  calSaveBtn.disabled = true;
+  calDeleteBtn.disabled = true;
+  try {
+    const before = calendarData.logs.length;
+    calendarData.logs = calendarData.logs.filter((l) => l.id !== id);
+    if (calendarData.logs.length === before) return;
+
+    const success = await persistCalendar();
+    if (!success) {
+      showStatus("삭제 중 문제가 발생했어요", true);
+      return;
+    }
+    showStatus("삭제했어요");
+    closeCalComposer();
+    renderCalendar();
+  } catch (err) {
+    console.error(err);
+    showStatus("삭제 중 문제가 발생했어요", true);
+  } finally {
+    calSaveBtn.disabled = false;
+    calDeleteBtn.disabled = false;
+  }
+}
+
+calSaveBtn.addEventListener("click", handleCalSave);
+calDeleteBtn.addEventListener("click", handleCalDelete);
+
+// ---------- 메모 아코디언 (캘린더 로그리스트 전용) ----------
+function toggleMemoAccordion(containerEl, memoElId) {
+  const memoEl = document.getElementById(memoElId);
+  if (!memoEl) return;
+  const isOpen = memoEl.classList.contains("open");
+
+  containerEl.querySelectorAll(".log-memo.open").forEach((openEl) => {
+    openEl.classList.remove("open");
+  });
+  containerEl.querySelectorAll(".icon-btn.memo-active").forEach((btn) => {
+    btn.classList.remove("memo-active");
+  });
+
+  if (!isOpen) {
+    memoEl.classList.add("open");
+    const btn = containerEl.querySelector(`button[data-memo-target="${memoElId}"]`);
+    if (btn) btn.classList.add("memo-active");
+  }
+}
+
+// ---------- 캘린더 렌더링 ----------
+function renderCalendar() {
+  const { year, month } = calState;
+  calMonthLabel.textContent = `${year}. ${String(month + 1).padStart(2, "0")}`;
+
+  const firstDay = new Date(year, month, 1);
+  const startWeekday = firstDay.getDay(); // 0(일) ~ 6(토)
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthPrefix = `${year}-${String(month + 1).padStart(2, "0")}`;
+
+  const datesWithLogs = new Set(
+    calendarData.logs.filter((l) => l.date.startsWith(monthPrefix)).map((l) => l.date)
+  );
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  calendarGrid.innerHTML = "";
+
+  for (let i = 0; i < startWeekday; i++) {
+    const empty = document.createElement("div");
+    empty.className = "calendar-cell empty";
+    calendarGrid.appendChild(empty);
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${monthPrefix}-${String(d).padStart(2, "0")}`;
+    const cell = document.createElement("div");
+    cell.className = "calendar-cell"
+      + (dateStr === todayStr ? " today" : "")
+      + (dateStr === selectedCalDate ? " selected" : "");
+    cell.dataset.date = dateStr;
+    cell.innerHTML = `
+      <span>${d}</span>
+      ${datesWithLogs.has(dateStr) ? '<span class="calendar-dot"></span>' : ""}
+    `;
+    calendarGrid.appendChild(cell);
+  }
+
+  renderCalendarLogList(monthPrefix);
+}
+
+function renderCalendarLogList(monthPrefix) {
+  calendarLogList.innerHTML = "";
+
+  const monthLogs = calendarData.logs
+    .filter((l) => l.date.startsWith(monthPrefix))
+    .sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+
+  calendarEmptyState.classList.toggle("hidden", monthLogs.length > 0);
+
+  monthLogs.forEach((l) => {
+    const day = parseInt(l.date.slice(-2), 10);
+    const hasMemo = !!(l.memo && l.memo.trim());
+    const memoElId = `cal-memo-${l.id}`;
+
+    const item = document.createElement("div");
+    item.className = "calendar-log-item";
+    item.dataset.id = l.id;
+    item.innerHTML = `
+      <span class="calendar-log-day">${day}.</span>
+      <div class="calendar-log-content">
+        <div class="calendar-log-row">
+          <span class="calendar-log-text">${escapeHtml(l.body)}</span>
+          ${hasMemo ? `
+            <button class="icon-btn" data-action="memo" data-memo-target="${memoElId}" title="메모 보기">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 4h16v12H8l-4 4V4z"></path>
+              </svg>
+            </button>
+          ` : ""}
+        </div>
+        ${hasMemo ? `
+          <div class="log-memo" id="${memoElId}">
+            <div class="log-memo-inner">${linkifyHtml(l.memo)}</div>
+          </div>
+        ` : ""}
+      </div>
+    `;
+    calendarLogList.appendChild(item);
+  });
+}
+
+calendarLogList.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (btn) {
+    if (btn.dataset.action === "memo") {
+      toggleMemoAccordion(calendarLogList, btn.dataset.memoTarget);
+    }
+    return;
+  }
+  const item = e.target.closest(".calendar-log-item");
+  if (!item || !item.dataset.id) return;
+  if (calEditingId === item.dataset.id) {
+    closeCalComposer();
+  } else {
+    openCalComposerForEdit(item.dataset.id);
+  }
+});
+
+calendarGrid.addEventListener("click", (e) => {
+  const cell = e.target.closest(".calendar-cell:not(.empty)");
+  if (!cell || !cell.dataset.date) return;
+  const dateStr = cell.dataset.date;
+  if (dateStr === selectedCalDate) {
+    closeCalComposer();
+  } else {
+    openCalComposer(dateStr);
   }
 });
 
