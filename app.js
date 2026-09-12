@@ -204,12 +204,19 @@ function openSearch() {
   searchInput.focus();
 }
 
+// 닫힐 때는 텍스트를 바로 지우지 않고, 오른쪽(검색 아이콘 방향)으로 접히는
+// 슬라이드 애니메이션(CSS의 width 전환 0.2s)이 끝난 뒤에 비운다.
+// 그래야 입력해둔 글자가 함께 슬라이드되며 사라지는 것처럼 보인다.
+const SEARCH_CLOSE_ANIM_MS = 200;
+
 function closeSearch() {
   searchInput.classList.remove("open");
   searchInput.blur();
-  searchInput.value = "";
   currentSearchQuery = "";
   applySearch("");
+  setTimeout(() => {
+    searchInput.value = "";
+  }, SEARCH_CLOSE_ANIM_MS);
 }
 
 searchBtn.addEventListener("click", () => {

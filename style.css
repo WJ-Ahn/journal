@@ -169,16 +169,16 @@ html, body {
   background: transparent;
   outline: none;
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 16px; /* iOS Safari에서 16px 미만이면 포커스 시 화면이 확대되는 것을 방지 */
   color: var(--ink);
   padding: 4px 0;
   opacity: 0;
-  transition: width 0.2s ease, opacity 0.15s ease, border-color 0.2s ease;
+  transition: width 0.2s ease, opacity 0.2s ease, border-color 0.2s ease;
 }
 .search-input-inline.open {
   width: 130px;
   opacity: 1;
-  border-bottom: 1px solid var(--ink-faint);
+  border-bottom: 1px solid var(--line); /* 헤더 구분선과 동일한 색상 */
 }
 .search-input-inline.open:focus {
   border-bottom-color: var(--accent);
