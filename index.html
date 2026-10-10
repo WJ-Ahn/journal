@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>SNS</title>
 <link rel="stylesheet" href="style.css" />
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#FAF9F5" />
+<link rel="apple-touch-icon" href="icon-192.png" />
 </head>
 <body>
   <div id="signin-screen" class="screen">
@@ -148,5 +151,12 @@
   <script src="config.js"></script>
   <script src="drive.js"></script>
   <script src="app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js");
+      });
+    }
+  </script>
 </body>
 </html>
